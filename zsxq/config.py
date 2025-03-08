@@ -6,8 +6,10 @@ config.read("config.ini", encoding='utf-8')
 
 
 TOPICS_URL = config['api'].get('topics_url')
-DOWNLOAD_FOLDER = config['File'].get('download_folder')
+FILE_DOWNLOAD_URL = config['api'].get('file_download_url')
+
 IMAGE_FOLDER = config['File'].get('image_folder')
+FILE_FOLDER = config['File'].get('file_folder')
 
 
 class Group():
@@ -36,8 +38,7 @@ class Group():
         for section in config.sections():
             if section != 'DEFAULT':
                 group = Group(config[section]['GROUP_NAME'],
-                              config[section]['GROUP_ID'],
-                              config[section]['OWNER_ID'])
+                              config[section]['GROUP_ID'])
                 if 'lastdownloadtime' in config[section].keys():
                     group.last_dl_time = config[section]['lastdownloadtime']
                 groups.append(group)

@@ -11,12 +11,62 @@ import os
 
 log = get_logger("zsxq")
 
+# 获取图片和文件存储根目录
+IMAGE_ROOT = config.IMAGE_FOLDER
+FILE_ROOT = config.FILE_FOLDER
+
+
+def download_file(file_id, file_name, group_name, topic_id, index):
+    """下载文件并保存到指定目录"""
+    try:
+        # 创建保存目录，使用配置的根目录
+        save_dir = os.path.join(FILE_ROOT, group_name, str(topic_id))
+        os.makedirs(save_dir, exist_ok=True)
+
+        # 获取文件扩展名
+        file_ext = os.path.splitext(file_name)[1]
+        if not file_ext:
+            file_ext = '.unknown'
+
+        # 构建保存路径
+        save_path = os.path.join(save_dir, f"{index}_{file_name}")
+        
+        # 如果文件已存在，直接返回路径
+        if os.path.exists(save_path):
+            return save_path
+
+        # 先获取文件的下载链接
+        url = config.FILE_DOWNLOAD_URL.format(file_id)
+        response = requests.get(url, headers=config.get_headers())
+        
+        if response.status_code == 200:
+            download_url = json.loads(response.text).get('resp_data', {}).get('download_url')
+            if download_url:
+                # 使用流式下载文件
+                file_response = requests.get(download_url, stream=True)
+                if file_response.status_code == 200:
+                    with open(save_path, 'wb') as file:
+                        for chunk in file_response.iter_content(1024):  # 每次读取1024字节
+                            file.write(chunk)
+                    log.info(f"Downloaded file: {save_path}")
+                    return save_path
+                else:
+                    log.error(f"Failed to download file from {download_url}, status code: {file_response.status_code}")
+            else:
+                log.error(f"No download URL found in response: {response.text}")
+        else:
+            log.error(f"Failed to get download URL, status code: {response.status_code}")
+        return None
+    except Exception as e:
+        log.error(f"Error downloading file {file_id}: {str(e)}")
+        return None
+
 
 def download_image(url, group_name, topic_id, index):
     """下载图片并保存到指定目录"""
     try:
-        # 创建保存目录
-        save_dir = os.path.join('res', group_name, str(topic_id))
+        # 创建保存目录，使用配置的根目录
+        save_dir = os.path.join(IMAGE_ROOT, group_name, str(topic_id))
         os.makedirs(save_dir, exist_ok=True)
 
         # 从URL中获取文件扩展名
@@ -30,7 +80,7 @@ def download_image(url, group_name, topic_id, index):
         
         # 如果文件已存在，直接返回相对路径
         if os.path.exists(save_path):
-            return os.path.relpath(save_path)
+            return save_path
 
         # 使用流式下载图片
         response = requests.get(url, stream=True)
@@ -39,7 +89,7 @@ def download_image(url, group_name, topic_id, index):
                 for chunk in response.iter_content(1024):  # 每次读取1024字节
                     file.write(chunk)
             log.info(f"Downloaded image: {save_path}")
-            return os.path.relpath(save_path)
+            return save_path
         else:
             log.error(f"Failed to download image {url}, status code: {response.status_code}")
             return None
@@ -66,13 +116,25 @@ def save(topics, df, group_name):
                         if saved_path:
                             image_paths.append(saved_path)
 
+            # 下载文件
+            file_paths = []
+            if 'files' in topic['talk']:
+                for i, file in enumerate(topic['talk']['files']):
+                    file_id = file.get('file_id')
+                    file_name = file.get('name')
+                    if file_id and file_name:
+                        saved_path = download_file(file_id, file_name, group_name, topic['topic_id'], i)
+                        if saved_path:
+                            file_paths.append(saved_path)
+
             row = {
                 'topic_id': topic['topic_id'],
                 'author': topic['talk']['owner']['name'],
                 'title': topic['title'],
                 'date': topic['create_time'],
                 'content': topic['talk']['text'],
-                'images': image_paths
+                'images': ','.join(image_paths) if image_paths else '',  # 将图片路径数组转换为逗号分隔的字符串
+                'files': ','.join(file_paths) if file_paths else ''  # 将文件路径数组转换为逗号分隔的字符串
             }
             df.loc[len(df)] = row
             count += 1
@@ -146,8 +208,11 @@ def start():
     log.info("Starting data fetch process")
     current_time = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%f")  # 移除时区信息
     
-    # 确保res目录存在
-    os.makedirs('res', exist_ok=True)
+    # 确保图片和文件根目录存在
+    os.makedirs(IMAGE_ROOT, exist_ok=True)
+    os.makedirs(FILE_ROOT, exist_ok=True)
+    log.info(f"Using image root directory: {IMAGE_ROOT}")
+    log.info(f"Using file root directory: {FILE_ROOT}")
     
     for group in config.GROUPS:
         log.info(f"Processing group: {group.group_name} (ID: {group.group_id})")
@@ -160,7 +225,7 @@ def start():
             log.info(f"Found {len(df)} existing records")
         else:
             log.info(f"Creating new file: {file_path}")
-            df = pd.DataFrame(columns=['topic_id', 'author', 'title', 'date', 'content', 'images'])
+            df = pd.DataFrame(columns=['topic_id', 'author', 'title', 'date', 'content', 'images', 'files'])
         
         last_download_time = group.last_dl_time
         base_url = config.TOPICS_URL.format(group.group_id)
