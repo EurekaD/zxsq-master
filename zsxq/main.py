@@ -1,3 +1,5 @@
+import random
+
 import requests
 import config
 from logger import get_logger
@@ -142,66 +144,87 @@ def save(topics, df, group_name):
     return earliest_time
 
 
-def process_topics(url, last_download_time, df, group_name):
+def parse_time(time_str):
     try:
-        log.info(f"Fetching topics from URL: {url}")
-        topics_page = requests.get(url, headers=config.get_headers())
-        earliest_time = None
-        if topics_page.status_code == 200:
-            response_data = json.loads(topics_page.text)
-            topics = response_data.get('resp_data', {}).get('topics', [])
-            if topics:
-                earliest_time = save(topics, df, group_name)
+        # 先尝试带时区的格式
+        dt = datetime.strptime(time_str, "%Y-%m-%dT%H:%M:%S.%f%z")
+        # 转换为不带时区的时间
+        return dt.replace(tzinfo=None)
+    except ValueError:
+        try:
+            # 如果失败，尝试不带时区的格式
+            return datetime.strptime(time_str, "%Y-%m-%dT%H:%M:%S.%f")
+        except ValueError:
+            # 如果还失败，可能没有微秒部分
+            return datetime.strptime(time_str, "%Y-%m-%dT%H:%M:%S")
+
+
+def process_topics(url, last_download_time, df, group_name):
+    retry_count = 0
+    while retry_count < 3:
+        try:
+            log.info(f"Fetching topics from URL: {url}")
+            topics_page = requests.get(url, headers=config.get_headers())
+            earliest_time = None
+            if topics_page.status_code == 200:
+                response_data = json.loads(topics_page.text)
+                topics = response_data.get('resp_data', {}).get('topics', [])
+                if topics:
+                    earliest_time = save(topics, df, group_name)
+                    t1 = parse_time(earliest_time)  # 抓取的最早时间
+                    t2 = parse_time(last_download_time)  # 上次抓取的时间
+
+                    if t1 > t2:
+                        # 本次抓取的最早的内容的时间 晚于（大于） 上次抓取的时间， 继续抓取
+                        return earliest_time
+                    else:
+                        log.info("Reached last download time, stopping fetch")
+                        return None
+                else:
+                    log.warning(f"No topics found in response: {response_data}")
+                    retry_count += 1
+                    if retry_count < 3:
+                        log.info(f"Retrying request (attempt {retry_count}/3)")
+                        random_sleep()
+                    continue
             else:
-                log.warning(f"No topics found in response: {response_data}")
+                log.error(f"Failed to fetch topics from {url}, status code: {topics_page.status_code}")
                 return None
 
-        def parse_time(time_str):
-            try:
-                # 先尝试带时区的格式
-                dt = datetime.strptime(time_str, "%Y-%m-%dT%H:%M:%S.%f%z")
-                # 转换为不带时区的时间
-                return dt.replace(tzinfo=None)
-            except ValueError:
-                try:
-                    # 如果失败，尝试不带时区的格式
-                    return datetime.strptime(time_str, "%Y-%m-%dT%H:%M:%S.%f")
-                except ValueError:
-                    # 如果还失败，可能没有微秒部分
-                    return datetime.strptime(time_str, "%Y-%m-%dT%H:%M:%S")
-
-        t1 = parse_time(earliest_time)  # 抓取的最早时间
-        t2 = parse_time(last_download_time)  # 上次抓取的时间
-        
-        if t1 > t2:
-            # 本次抓取的最早的内容的时间 晚于（大于） 上次抓取的时间， 继续抓取
-            return earliest_time
-        else:
-            log.info("Reached last download time, stopping fetch")
+        except RequestException as e:
+            log.error(f'Get topics error: {str(e)}')
             return None
+        except Exception as e:
+            log.error(f'Unexpected error while processing topics: {str(e)}')
+            log.error(f'earliest_time: {earliest_time}')
+            log.error(f'last_download_time: {last_download_time}')
+            return None
+    
+    log.error("Max retry attempts reached, giving up")
+    return None
 
-    except RequestException as e:
-        log.error(f'Get topics error: {str(e)}')
-        return None
-    except Exception as e:
-        log.error(f'Unexpected error while processing topics: {str(e)}')
-        log.error(f'earliest_time: {earliest_time}')
-        log.error(f'last_download_time: {last_download_time}')
-        return None
+
+# 随机延时
+def random_sleep():
+    # 随机延时3-8秒
+    delay = random.uniform(10, 20)
+    log.info(f"Random sleep {delay} seconds")
+    time.sleep(delay)
 
 
-def get_topic_list(base_url, last_download_time, df, group_name, end_time=None):
-    if end_time:
-        url = base_url + '&end_time=' + quote(end_time)
-    else:
+def get_topic_list(base_url, last_download_time, df, group_name):
+    end_time = None
+    while True:
         url = base_url
-
-    end_time = process_topics(url, last_download_time, df, group_name)
-
-    time.sleep(5)
-    if end_time:
+        if end_time:
+            url = base_url + '&end_time=' + quote(end_time)
+        
+        end_time = process_topics(url, last_download_time, df, group_name)
+        if not end_time:
+            break
+            
+        random_sleep()
         log.info(f'Got topics till {end_time}, continuing to fetch earlier topics')
-        get_topic_list(base_url, last_download_time, df, group_name, end_time)
 
 
 def start():
